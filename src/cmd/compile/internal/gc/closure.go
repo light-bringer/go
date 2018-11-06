@@ -16,7 +16,7 @@ func (p *noder) funcLit(expr *syntax.FuncLit) *Node {
 
 	xfunc := p.nod(expr, ODCLFUNC, nil, nil)
 	xfunc.Func.SetIsHiddenClosure(Curfn != nil)
-	xfunc.Func.Nname = p.setlineno(expr, newfuncname(nblank.Sym)) // filled in by typecheckclosure
+	xfunc.Func.Nname = newfuncnamel(p.pos(expr), nblank.Sym) // filled in by typecheckclosure
 	xfunc.Func.Nname.Name.Param.Ntype = xtype
 	xfunc.Func.Nname.Name.Defn = xfunc
 
@@ -314,7 +314,7 @@ func transformclosure(xfunc *Node) {
 	lineno = lno
 }
 
-// hasemptycvars returns true iff closure clo has an
+// hasemptycvars reports whether closure clo has an
 // empty list of captured vars.
 func hasemptycvars(clo *Node) bool {
 	xfunc := clo.Func.Closure

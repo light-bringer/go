@@ -26,17 +26,19 @@ const (
 	VersionTLS10 = 0x0301
 	VersionTLS11 = 0x0302
 	VersionTLS12 = 0x0303
+
+	// VersionTLS13 is under development in this library and can't be selected
+	// nor negotiated yet on either side.
+	VersionTLS13 = 0x0304
 )
 
 const (
-	maxPlaintext      = 16384        // maximum plaintext payload length
-	maxCiphertext     = 16384 + 2048 // maximum ciphertext payload length
-	recordHeaderLen   = 5            // record header length
-	maxHandshake      = 65536        // maximum handshake we support (protocol max is 16 MB)
-	maxWarnAlertCount = 5            // maximum number of consecutive warning alerts
-
-	minVersion = VersionTLS10
-	maxVersion = VersionTLS12
+	maxPlaintext       = 16384        // maximum plaintext payload length
+	maxCiphertext      = 16384 + 2048 // maximum ciphertext payload length
+	maxCiphertextTLS13 = 16384 + 256  // maximum ciphertext length in TLS 1.3
+	recordHeaderLen    = 5            // record header length
+	maxHandshake       = 65536        // maximum handshake we support (protocol max is 16 MB)
+	maxUselessRecords  = 5            // maximum number of consecutive non-advancing records
 )
 
 // TLS record types.
@@ -51,19 +53,23 @@ const (
 
 // TLS handshake message types.
 const (
-	typeHelloRequest       uint8 = 0
-	typeClientHello        uint8 = 1
-	typeServerHello        uint8 = 2
-	typeNewSessionTicket   uint8 = 4
-	typeCertificate        uint8 = 11
-	typeServerKeyExchange  uint8 = 12
-	typeCertificateRequest uint8 = 13
-	typeServerHelloDone    uint8 = 14
-	typeCertificateVerify  uint8 = 15
-	typeClientKeyExchange  uint8 = 16
-	typeFinished           uint8 = 20
-	typeCertificateStatus  uint8 = 22
-	typeNextProtocol       uint8 = 67 // Not IANA assigned
+	typeHelloRequest        uint8 = 0
+	typeClientHello         uint8 = 1
+	typeServerHello         uint8 = 2
+	typeNewSessionTicket    uint8 = 4
+	typeEndOfEarlyData      uint8 = 5
+	typeEncryptedExtensions uint8 = 8
+	typeCertificate         uint8 = 11
+	typeServerKeyExchange   uint8 = 12
+	typeCertificateRequest  uint8 = 13
+	typeServerHelloDone     uint8 = 14
+	typeCertificateVerify   uint8 = 15
+	typeClientKeyExchange   uint8 = 16
+	typeFinished            uint8 = 20
+	typeCertificateStatus   uint8 = 22
+	typeKeyUpdate           uint8 = 24
+	typeNextProtocol        uint8 = 67  // Not IANA assigned
+	typeMessageHash         uint8 = 254 // synthetic message
 )
 
 // TLS compression types.
@@ -73,16 +79,23 @@ const (
 
 // TLS extension numbers
 const (
-	extensionServerName          uint16 = 0
-	extensionStatusRequest       uint16 = 5
-	extensionSupportedCurves     uint16 = 10
-	extensionSupportedPoints     uint16 = 11
-	extensionSignatureAlgorithms uint16 = 13
-	extensionALPN                uint16 = 16
-	extensionSCT                 uint16 = 18 // RFC 6962, Section 6
-	extensionSessionTicket       uint16 = 35
-	extensionNextProtoNeg        uint16 = 13172 // not IANA assigned
-	extensionRenegotiationInfo   uint16 = 0xff01
+	extensionServerName              uint16 = 0
+	extensionStatusRequest           uint16 = 5
+	extensionSupportedCurves         uint16 = 10 // supported_groups in TLS 1.3, see RFC 8446, Section 4.2.7
+	extensionSupportedPoints         uint16 = 11
+	extensionSignatureAlgorithms     uint16 = 13
+	extensionALPN                    uint16 = 16
+	extensionSCT                     uint16 = 18
+	extensionSessionTicket           uint16 = 35
+	extensionPreSharedKey            uint16 = 41
+	extensionEarlyData               uint16 = 42
+	extensionSupportedVersions       uint16 = 43
+	extensionCookie                  uint16 = 44
+	extensionPSKModes                uint16 = 45
+	extensionSignatureAlgorithmsCert uint16 = 50
+	extensionKeyShare                uint16 = 51
+	extensionNextProtoNeg            uint16 = 13172 // not IANA assigned
+	extensionRenegotiationInfo       uint16 = 0xff01
 )
 
 // TLS signaling cipher suite values
@@ -91,7 +104,10 @@ const (
 )
 
 // CurveID is the type of a TLS identifier for an elliptic curve. See
-// https://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-8
+// https://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-8.
+//
+// In TLS 1.3, this type is called NamedGroup, but at this time this library
+// only supports Elliptic Curve based groups. See RFC 8446, Section 4.2.7.
 type CurveID uint16
 
 const (
@@ -100,6 +116,25 @@ const (
 	CurveP521 CurveID = 25
 	X25519    CurveID = 29
 )
+
+// TLS 1.3 Key Share. See RFC 8446, Section 4.2.8.
+type keyShare struct {
+	group CurveID
+	data  []byte
+}
+
+// TLS 1.3 PSK Key Exchange Modes. See RFC 8446, Section 4.2.9.
+const (
+	pskModePlain uint8 = 0
+	pskModeDHE   uint8 = 1
+)
+
+// TLS 1.3 PSK Identity. Can be a Session Ticket, or a reference to a saved
+// session. See RFC 8446, Section 4.2.11.
+type pskIdentity struct {
+	label               []byte
+	obfuscatedTicketAge uint32
+}
 
 // TLS Elliptic Curve Point Formats
 // https://www.iana.org/assignments/tls-parameters/tls-parameters.xml#tls-parameters-9
@@ -114,17 +149,8 @@ const (
 
 // Certificate types (for certificateRequestMsg)
 const (
-	certTypeRSASign    = 1 // A certificate containing an RSA key
-	certTypeDSSSign    = 2 // A certificate containing a DSA key
-	certTypeRSAFixedDH = 3 // A certificate containing a static DH key
-	certTypeDSSFixedDH = 4 // A certificate containing a static DH key
-
-	// See RFC 4492 sections 3 and 5.5.
-	certTypeECDSASign      = 64 // A certificate containing an ECDSA-capable public key, signed with ECDSA.
-	certTypeRSAFixedECDH   = 65 // A certificate containing an ECDH-capable public key, signed with RSA.
-	certTypeECDSAFixedECDH = 66 // A certificate containing an ECDH-capable public key, signed with ECDSA.
-
-	// Rest of these are reserved by the TLS spec
+	certTypeRSASign   = 1
+	certTypeECDSASign = 64 // RFC 4492, Section 5.5
 )
 
 // Signature algorithms (for internal signaling use). Starting at 16 to avoid overlap with
@@ -140,6 +166,9 @@ const (
 // CertificateRequest. The two fields are merged to match with TLS 1.3.
 // Note that in TLS 1.2, the ECDSA algorithms are not constrained to P-256, etc.
 var supportedSignatureAlgorithms = []SignatureScheme{
+	PSSWithSHA256,
+	PSSWithSHA384,
+	PSSWithSHA512,
 	PKCS1WithSHA256,
 	ECDSAWithP256AndSHA256,
 	PKCS1WithSHA384,
@@ -148,6 +177,15 @@ var supportedSignatureAlgorithms = []SignatureScheme{
 	ECDSAWithP521AndSHA512,
 	PKCS1WithSHA1,
 	ECDSAWithSHA1,
+}
+
+// helloRetryRequestRandom is set as the Random value of a ServerHello
+// to signal that the message is actually a HelloRetryRequest.
+var helloRetryRequestRandom = []byte{ // See RFC 8446, Section 4.1.3.
+	0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+	0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+	0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+	0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
 }
 
 // ConnectionState records basic TLS details about the connection.
@@ -231,6 +269,7 @@ const (
 	PKCS1WithSHA384 SignatureScheme = 0x0501
 	PKCS1WithSHA512 SignatureScheme = 0x0601
 
+	// RSASSA-PSS algorithms with public key OID rsaEncryption.
 	PSSWithSHA256 SignatureScheme = 0x0804
 	PSSWithSHA384 SignatureScheme = 0x0805
 	PSSWithSHA512 SignatureScheme = 0x0806
@@ -317,6 +356,8 @@ type CertificateRequestInfo struct {
 // handshake and application data flow is not permitted so renegotiation can
 // only be used with protocols that synchronise with the renegotiation, such as
 // HTTPS.
+//
+// Renegotiation is not defined in TLS 1.3.
 type RenegotiationSupport int
 
 const (
@@ -491,7 +532,8 @@ type Config struct {
 
 	// CurvePreferences contains the elliptic curves that will be used in
 	// an ECDHE handshake, in preference order. If empty, the default will
-	// be used.
+	// be used. The client will use the first preference as the type for
+	// its key share in TLS 1.3. This may change in the future.
 	CurvePreferences []CurveID
 
 	// DynamicRecordSizingDisabled disables adaptive sizing of TLS records.
@@ -676,18 +718,48 @@ func (c *Config) cipherSuites() []uint16 {
 	return s
 }
 
-func (c *Config) minVersion() uint16 {
-	if c == nil || c.MinVersion == 0 {
-		return minVersion
-	}
-	return c.MinVersion
+var supportedVersions = []uint16{
+	VersionTLS13,
+	VersionTLS12,
+	VersionTLS11,
+	VersionTLS10,
+	VersionSSL30,
 }
 
-func (c *Config) maxVersion() uint16 {
-	if c == nil || c.MaxVersion == 0 {
-		return maxVersion
+func (c *Config) supportedVersions(isClient bool) []uint16 {
+	versions := make([]uint16, 0, len(supportedVersions))
+	for _, v := range supportedVersions {
+		if c != nil && c.MinVersion != 0 && v < c.MinVersion {
+			continue
+		}
+		if c != nil && c.MaxVersion != 0 && v > c.MaxVersion {
+			continue
+		}
+		// TLS 1.0 is the minimum version supported as a client.
+		if isClient && v < VersionTLS10 {
+			continue
+		}
+		// TLS 1.3 is only supported if explicitly requested while in development.
+		if v == VersionTLS13 && (c == nil || c.MaxVersion != VersionTLS13) {
+			continue
+		}
+		versions = append(versions, v)
 	}
-	return c.MaxVersion
+	return versions
+}
+
+// supportedVersionsFromMax returns a list of supported versions derived from a
+// legacy maximum version value. Note that only versions supported by this
+// library are returned. Any newer peer will use supportedVersions anyway.
+func supportedVersionsFromMax(maxVersion uint16) []uint16 {
+	versions := make([]uint16, 0, len(supportedVersions))
+	for _, v := range supportedVersions {
+		if v > maxVersion {
+			continue
+		}
+		versions = append(versions, v)
+	}
+	return versions
 }
 
 var defaultCurvePreferences = []CurveID{X25519, CurveP256, CurveP384, CurveP521}
@@ -700,18 +772,17 @@ func (c *Config) curvePreferences() []CurveID {
 }
 
 // mutualVersion returns the protocol version to use given the advertised
-// version of the peer.
-func (c *Config) mutualVersion(vers uint16) (uint16, bool) {
-	minVersion := c.minVersion()
-	maxVersion := c.maxVersion()
-
-	if vers < minVersion {
-		return 0, false
+// versions of the peer. Priority is given to the peer preference order.
+func (c *Config) mutualVersion(isClient bool, peerVersions []uint16) (uint16, bool) {
+	supportedVersions := c.supportedVersions(isClient)
+	for _, peerVersion := range peerVersions {
+		for _, v := range supportedVersions {
+			if v == peerVersion {
+				return v, true
+			}
+		}
 	}
-	if vers > maxVersion {
-		vers = maxVersion
-	}
-	return vers, true
+	return 0, false
 }
 
 // getCertificate returns the best certificate for the given ClientHelloInfo,
@@ -765,10 +836,14 @@ func (c *Config) BuildNameToCertificate() {
 	c.NameToCertificate = make(map[string]*Certificate)
 	for i := range c.Certificates {
 		cert := &c.Certificates[i]
-		x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
-		if err != nil {
-			continue
+		if cert.Leaf == nil {
+			x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				continue
+			}
+			cert.Leaf = x509Cert
 		}
+		x509Cert := cert.Leaf
 		if len(x509Cert.Subject.CommonName) > 0 {
 			c.NameToCertificate[x509Cert.Subject.CommonName] = cert
 		}
@@ -910,8 +985,9 @@ func defaultConfig() *Config {
 }
 
 var (
-	once                   sync.Once
-	varDefaultCipherSuites []uint16
+	once                        sync.Once
+	varDefaultCipherSuites      []uint16
+	varDefaultCipherSuitesTLS13 []uint16
 )
 
 func defaultCipherSuites() []uint16 {
@@ -919,19 +995,24 @@ func defaultCipherSuites() []uint16 {
 	return varDefaultCipherSuites
 }
 
+func defaultCipherSuitesTLS13() []uint16 {
+	once.Do(initDefaultCipherSuites)
+	return varDefaultCipherSuitesTLS13
+}
+
 func initDefaultCipherSuites() {
 	var topCipherSuites []uint16
 
 	// Check the cpu flags for each platform that has optimized GCM implementations.
-	// Worst case, these variables will just all be false
-	hasGCMAsmAMD64 := cpu.X86.HasAES && cpu.X86.HasPCLMULQDQ
+	// Worst case, these variables will just all be false.
+	var (
+		hasGCMAsmAMD64 = cpu.X86.HasAES && cpu.X86.HasPCLMULQDQ
+		hasGCMAsmARM64 = cpu.ARM64.HasAES && cpu.ARM64.HasPMULL
+		// Keep in sync with crypto/aes/cipher_s390x.go.
+		hasGCMAsmS390X = cpu.S390X.HasAES && cpu.S390X.HasAESCBC && cpu.S390X.HasAESCTR && (cpu.S390X.HasGHASH || cpu.S390X.HasAESGCM)
 
-	hasGCMAsmARM64 := cpu.ARM64.HasAES && cpu.ARM64.HasPMULL
-
-	// Keep in sync with crypto/aes/cipher_s390x.go.
-	hasGCMAsmS390X := cpu.S390X.HasAES && cpu.S390X.HasAESCBC && cpu.S390X.HasAESCTR && (cpu.S390X.HasGHASH || cpu.S390X.HasAESGCM)
-
-	hasGCMAsm := hasGCMAsmAMD64 || hasGCMAsmARM64 || hasGCMAsmS390X
+		hasGCMAsm = hasGCMAsmAMD64 || hasGCMAsmARM64 || hasGCMAsmS390X
+	)
 
 	if hasGCMAsm {
 		// If AES-GCM hardware is provided then prioritise AES-GCM
@@ -944,6 +1025,11 @@ func initDefaultCipherSuites() {
 			TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 			TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 		}
+		varDefaultCipherSuitesTLS13 = []uint16{
+			TLS_AES_128_GCM_SHA256,
+			TLS_CHACHA20_POLY1305_SHA256,
+			TLS_AES_256_GCM_SHA384,
+		}
 	} else {
 		// Without AES-GCM hardware, we put the ChaCha20-Poly1305
 		// cipher suites first.
@@ -954,6 +1040,11 @@ func initDefaultCipherSuites() {
 			TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 			TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		}
+		varDefaultCipherSuitesTLS13 = []uint16{
+			TLS_CHACHA20_POLY1305_SHA256,
+			TLS_AES_128_GCM_SHA256,
+			TLS_AES_256_GCM_SHA384,
 		}
 	}
 
